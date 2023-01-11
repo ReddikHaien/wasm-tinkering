@@ -13,7 +13,7 @@ pub struct Process(InnerProcess);
 struct InnerProcess{
     main_handle: JoinHandle<Result<(), Error>>
 }
-
+#[derive(Clone)]
 struct ThreadData{
     engine: Engine,
     module: Module,
@@ -41,16 +41,38 @@ impl Process{
 
         wasmtime_wasi::tokio::add_to_linker(&mut linker, |cx| cx)?;
 
-        linker.func_wrap("env", "spawn_thread", move |mut caller: Caller<WasiCtx>,y: i32, x: i32|{
+        linker.func_wrap("env", "spawn_thread", move |mut caller: Caller<WasiCtx>,f_ptr: i32|{
             let thread_data: &ThreadData = caller.data_mut().table().get(THREAD_DATA_KEY).unwrap();
-            println!("{:?}",thread_data.instance.);
-            println!("thread {} tries to create an thread with entry method {} and closure {}",thread_data.thread_name,y,x);
+            let engine = thread_data.engine.clone();
+            let module = thread_data.module.clone();
+            let linker = thread_data.linker.clone();
+            let handler : JoinHandle<Result<(), Error>>= tokio::task::spawn(async move{
+                let thread_id = THREAD_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                
+                let (mut store, instance) = Self::create_environment(&engine, &module, linker.as_ref(), "child").await?;
+
+                store.data_mut().table().insert_at(THREAD_DATA_KEY, Box::new(ThreadData{
+                    engine,
+                    instance,
+                    linker,
+                    module,
+                    thread_id,
+                    thread_name: "child".to_owned()
+                }));
+
+                
+
+                Ok(())
+            });
+            
             0i64
         })?;
 
         let main_handle = tokio::task::spawn(async move{
 
             let thread_id = THREAD_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+
 
             //setup environment
             let (mut store, instance) = {
@@ -67,7 +89,7 @@ impl Process{
             }));
 
             //Start up process
-            Self::run_async(store, instance, "_start").await
+            Self::run_async(store, instance, "__process_entry_point").await
         });
 
         Ok(Self(InnerProcess{
@@ -89,6 +111,12 @@ impl Process{
         let instance = linker.instantiate_async(&mut store, module).await?;
 
        Ok((store, instance))
+    }
+
+    async fn run_async_with(mut store: Store<WasiCtx>, instance: Instance, method: i32) -> Result<(), Error>{
+        instance
+        .get_typed_func::<(i32,),()>(&mut store, "__thread_entry_point")?
+        .call_async(&mut store, (method));
     }
 
     async fn run_async(mut store: Store<WasiCtx>, instance: Instance, entry_point: &str) -> Result<(), Error> {

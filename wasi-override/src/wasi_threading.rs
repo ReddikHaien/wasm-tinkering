@@ -1,6 +1,6 @@
 use std::{ffi::c_void, marker::PhantomData, time::Duration};
 
-use crate::{spawn_thread, sleep_thread, spawn_handler};
+use crate::{spawn_thread, sleep_thread};
 
 pub fn sleep(duration: Duration){
     let secs = duration.as_secs();
@@ -26,7 +26,7 @@ pub fn spawn<T, F>(f: F) -> JoinHandle<T>
     let cb_ptr = Box::new(Box::new(cb));
 
     let thread_id = unsafe {
-        spawn_thread(spawn_handler, Box::into_raw(cb_ptr) as *mut c_void) as u64
+        spawn_thread(Box::into_raw(cb_ptr) as *mut c_void) as u64
     };
 
     let thread = Thread{

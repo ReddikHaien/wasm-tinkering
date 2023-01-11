@@ -10,3 +10,5 @@ fn main() {
 fn worker(){
     println!("Hello from worker!")
 }
+
+main_entry!(main);

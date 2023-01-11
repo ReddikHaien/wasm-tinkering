@@ -9,11 +9,24 @@ pub use wasi_threading as thread;
 
 
 extern "C" {
-    pub(crate) fn spawn_thread(entry_point: extern "C" fn(arg: *mut c_void) -> *const c_void, arg: *mut c_void) -> i64;
+    ///
+    /// Spawns a new thread with the given entry point
+    pub(crate) fn spawn_thread(entry_point: *mut c_void) -> i64;
     pub(crate) fn sleep_thread(seconds: i64, microseconds: i32);
 }
 
-extern "C" fn spawn_handler(arg: *mut c_void) -> *const c_void{
-    let closure: &mut &mut dyn FnMut() -> *const c_void = unsafe { std::mem::transmute(arg) };
+#[no_mangle]
+pub extern "C" fn __thread_entry_point(entry_ptr: *mut c_void) -> *const c_void{
+    let closure: &mut &mut dyn FnMut() -> *const c_void = unsafe { std::mem::transmute(entry_ptr) };
     closure()
+}
+
+#[macro_export]
+macro_rules! main_entry {
+    ($method:ident) => {
+        #[no_mangle]
+        pub extern "C" fn __process_entry_point(){
+            $method();
+        }
+    };
 }
