@@ -116,7 +116,8 @@ impl Process{
     async fn run_async_with(mut store: Store<WasiCtx>, instance: Instance, method: i32) -> Result<(), Error>{
         instance
         .get_typed_func::<(i32,),()>(&mut store, "__thread_entry_point")?
-        .call_async(&mut store, (method));
+        .call_async(&mut store, (method,))
+        .await
     }
 
     async fn run_async(mut store: Store<WasiCtx>, instance: Instance, entry_point: &str) -> Result<(), Error> {
