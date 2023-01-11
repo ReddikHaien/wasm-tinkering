@@ -12,3 +12,8 @@ extern "C" {
     pub(crate) fn spawn_thread(entry_point: extern "C" fn(arg: *mut c_void) -> *const c_void, arg: *mut c_void) -> i64;
     pub(crate) fn sleep_thread(seconds: i64, microseconds: i32);
 }
+
+extern "C" fn spawn_handler(arg: *mut c_void) -> *const c_void{
+    let closure: &mut &mut dyn FnMut() -> *const c_void = unsafe { std::mem::transmute(arg) };
+    closure()
+}

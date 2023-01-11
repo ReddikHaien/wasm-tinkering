@@ -8,5 +8,6 @@ mod process;
 async fn main() -> Result<(),Error>{
 
     let process = Process::new("wasm-test.wasm")?;
-    Ok(())
+
+    process.wait_for_completion().await
 }

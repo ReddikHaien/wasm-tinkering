@@ -1,6 +1,6 @@
 use std::{ffi::c_void, marker::PhantomData, time::Duration};
 
-use crate::{spawn_thread, sleep_thread};
+use crate::{spawn_thread, sleep_thread, spawn_handler};
 
 pub fn sleep(duration: Duration){
     let secs = duration.as_secs();
@@ -41,10 +41,7 @@ pub fn spawn<T, F>(f: F) -> JoinHandle<T>
     handle
 }
 
-extern "C" fn spawn_handler(arg: *mut c_void) -> *const c_void{
-    let closure: &mut &mut dyn FnMut() -> *const c_void = unsafe { std::mem::transmute(arg) };
-    closure()
-}
+
 
 pub struct ThreadId(u64);
 

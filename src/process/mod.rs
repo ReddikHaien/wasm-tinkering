@@ -7,20 +7,25 @@ use wasmtime::{Store, Engine, Module, Linker, Config, Caller, TypedFunc, Instanc
 use wasmtime_wasi::{tokio::WasiCtxBuilder, WasiCtx};
 
 
+
 pub struct Process(InnerProcess);
 
 struct InnerProcess{
-    main_handle: JoinHandle<()>
+    main_handle: JoinHandle<Result<(), Error>>
 }
 
 struct ThreadData{
     engine: Engine,
     module: Module,
-    linker: Arc<Linker<WasiCtx>>
+    linker: Arc<Linker<WasiCtx>>,
+    instance: Instance,
+    thread_id: u64,
+    thread_name: String,
 }
 
-static DATA: RwLock<BTreeMap<u64,ThreadData>> = RwLock::const_new(BTreeMap::new());
 static THREAD_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const THREAD_DATA_KEY:u32 = 8192;
 
 impl Process{
     pub fn new(module: &str) -> Result<Self, Error>{
@@ -36,32 +41,33 @@ impl Process{
 
         wasmtime_wasi::tokio::add_to_linker(&mut linker, |cx| cx)?;
 
-        linker.func_wrap("env", "spawn_thread", move |x: i32|{
-            0
+        linker.func_wrap("env", "spawn_thread", move |mut caller: Caller<WasiCtx>,y: i32, x: i32|{
+            let thread_data: &ThreadData = caller.data_mut().table().get(THREAD_DATA_KEY).unwrap();
+            println!("{:?}",thread_data.instance.);
+            println!("thread {} tries to create an thread with entry method {} and closure {}",thread_data.thread_name,y,x);
+            0i64
         })?;
 
         let main_handle = tokio::task::spawn(async move{
 
             let thread_id = THREAD_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
 
-            //Move the processdata into the thread
-            {
-                let mut write_lock = DATA.write().await;
-                write_lock.insert(thread_id, ThreadData{
-                    engine,
-                    module,
-                    linker: Arc::new(linker),
-                });
-            }
-
-            //Fire up the process
-            let (store, instance) = {
-                let read_lock = DATA.read().await;
-                let env = &read_lock[&thread_id];
-                Self::create_environment(env, "main").expect("Create Store and Instance")
+            //setup environment
+            let (mut store, instance) = {
+                Self::create_environment(&engine, &module, &linker, "main").await?
             };
-            
-            Self::run_async(store, instance, "_start").await.unwrap();
+
+            store.data_mut().table.insert_at(THREAD_DATA_KEY,Box::new(ThreadData{
+                engine,
+                module,
+                linker: Arc::new(linker),
+                thread_id,
+                thread_name: "main".to_owned(),
+                instance
+            }));
+
+            //Start up process
+            Self::run_async(store, instance, "_start").await
         });
 
         Ok(Self(InnerProcess{
@@ -69,18 +75,18 @@ impl Process{
         }))
     }
 
-    fn create_environment(env: &ThreadData, thread_name: &str) -> Result<(Store<WasiCtx>, Instance),Error>{
+    async fn create_environment(engine: &Engine, module: &Module, linker: &Linker<WasiCtx>, thread_name: &str) -> Result<(Store<WasiCtx>, Instance),Error>{
         let wasi = WasiCtxBuilder::new()
         .inherit_stdout()
         .inherit_stderr()
         .env("THREAD_NAME", thread_name)?
         .build();
 
-        let mut store = Store::new(&env.engine, wasi);
+        let mut store = Store::new(engine, wasi);
 
         store.out_of_fuel_async_yield(u64::MAX,1000);
 
-        let instance = env.linker.instantiate(&mut store, &env.module)?;
+        let instance = linker.instantiate_async(&mut store, module).await?;
 
        Ok((store, instance))
     }
@@ -90,5 +96,10 @@ impl Process{
         .get_typed_func::<(),()>(&mut store, entry_point)?
         .call_async(&mut store, ())
         .await
+    }
+
+    pub async fn wait_for_completion(self) -> Result<(), Error> {
+        self.0.main_handle.await??;
+        Ok(())
     }
 }
