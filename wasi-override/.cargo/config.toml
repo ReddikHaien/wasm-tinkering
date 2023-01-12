@@ -1,0 +1,6 @@
+[build]
+rustflags = [
+    "-C", "target-feature=+atomics",
+    "-C", "target-feature=+bulk-memory",
+    "-C", "link-arg=--shared-memory"
+]

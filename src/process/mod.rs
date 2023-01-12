@@ -13,7 +13,7 @@ pub struct Process(InnerProcess);
 struct InnerProcess{
     main_handle: JoinHandle<Result<(), Error>>
 }
-#[derive(Clone)]
+
 struct ThreadData{
     engine: Engine,
     module: Module,
@@ -21,6 +21,21 @@ struct ThreadData{
     instance: Instance,
     thread_id: u64,
     thread_name: String,
+    child_threads: Vec<(u64, JoinHandle<Result<i32, Error>>)>
+}
+
+impl ThreadData{
+    pub fn new(engine: Engine, module: Module, linker: Arc<Linker<WasiCtx>>, instance: Instance, thread_id: u64, thread_name: String) -> Self{
+        Self{
+            engine,
+            module,
+            linker,
+            instance,
+            thread_id,
+            thread_name,
+            child_threads: Vec::new()
+        }
+    }
 }
 
 static THREAD_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -42,31 +57,40 @@ impl Process{
         wasmtime_wasi::tokio::add_to_linker(&mut linker, |cx| cx)?;
 
         linker.func_wrap("env", "spawn_thread", move |mut caller: Caller<WasiCtx>,f_ptr: i32|{
-            let thread_data: &ThreadData = caller.data_mut().table().get(THREAD_DATA_KEY).unwrap();
+            let thread_data: &mut ThreadData = caller.data_mut().table().get_mut(THREAD_DATA_KEY).unwrap();
             let engine = thread_data.engine.clone();
             let module = thread_data.module.clone();
             let linker = thread_data.linker.clone();
-            let handler : JoinHandle<Result<(), Error>>= tokio::task::spawn(async move{
-                let thread_id = THREAD_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-                
+            let new_thread_id = THREAD_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+            println!("host received: {}",f_ptr);
+
+            let handler: JoinHandle<Result<i32, Error>>= tokio::task::spawn(async move{
+
                 let (mut store, instance) = Self::create_environment(&engine, &module, linker.as_ref(), "child").await?;
+                instance.get_memory(&mut store, "memory");
+                store.data_mut().table().insert_at(THREAD_DATA_KEY, Box::new(ThreadData::new(engine, module, linker, instance, new_thread_id, "child".to_owned())));
 
-                store.data_mut().table().insert_at(THREAD_DATA_KEY, Box::new(ThreadData{
-                    engine,
-                    instance,
-                    linker,
-                    module,
-                    thread_id,
-                    thread_name: "child".to_owned()
-                }));
-
-                
-
-                Ok(())
+                Self::run_async_with(store, instance, f_ptr).await
             });
             
-            0i64
+            thread_data.child_threads.push((new_thread_id, handler));
+
+            new_thread_id
         })?;
+
+        
+        linker.func_wrap1_async("env", "join_thread", |mut caller: Caller<WasiCtx>, thread_id: i64|{
+            let data: &mut ThreadData = caller.data_mut().table.get_mut(THREAD_DATA_KEY).unwrap();
+
+            let child_thread = data.child_threads.iter().enumerate().find_map(|(i,(ti,_))| if *ti == (thread_id as u64) {Some(i)}else{None}).expect("Thread should be owned for it to be joined");
+            
+            let (_, handle) = data.child_threads.swap_remove(child_thread);
+
+            Box::new(async move {
+                handle.await.expect("Thread to run without error")
+            })
+        })?;      
 
         let main_handle = tokio::task::spawn(async move{
 
@@ -79,14 +103,7 @@ impl Process{
                 Self::create_environment(&engine, &module, &linker, "main").await?
             };
 
-            store.data_mut().table.insert_at(THREAD_DATA_KEY,Box::new(ThreadData{
-                engine,
-                module,
-                linker: Arc::new(linker),
-                thread_id,
-                thread_name: "main".to_owned(),
-                instance
-            }));
+            store.data_mut().table.insert_at(THREAD_DATA_KEY,Box::new(ThreadData::new(engine, module, Arc::new(linker), instance, thread_id, "main".to_owned())));
 
             //Start up process
             Self::run_async(store, instance, "__process_entry_point").await
@@ -113,10 +130,10 @@ impl Process{
        Ok((store, instance))
     }
 
-    async fn run_async_with(mut store: Store<WasiCtx>, instance: Instance, method: i32) -> Result<(), Error>{
+    async fn run_async_with(mut store: Store<WasiCtx>, instance: Instance, method: i32) -> Result<i32, Error>{
         instance
-        .get_typed_func::<(i32,),()>(&mut store, "__thread_entry_point")?
-        .call_async(&mut store, (method,))
+        .get_typed_func::<i32,i32>(&mut store, "__thread_entry_point")?
+        .call_async(&mut store, method)
         .await
     }
 
