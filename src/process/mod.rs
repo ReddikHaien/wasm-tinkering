@@ -1,3 +1,5 @@
+mod memory;
+
 use core::str;
 use std::{sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, mem::MaybeUninit, cell::{RefCell, OnceCell}, collections::BTreeMap, thread::ThreadId};
 
@@ -5,6 +7,8 @@ use anyhow::Error;
 use tokio::{task::JoinHandle, task_local, sync::RwLock};
 use wasmtime::{Store, Engine, Module, Linker, Config, Caller, TypedFunc, Instance};
 use wasmtime_wasi::{tokio::WasiCtxBuilder, WasiCtx};
+
+use self::memory::UnsafeSharedMemoryCreator;
 
 
 
@@ -42,14 +46,21 @@ static THREAD_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const THREAD_DATA_KEY:u32 = 8192;
 
+
+
 impl Process{
-    pub fn new(module: &str) -> Result<Self, Error>{
+    pub async fn new(module: &str) -> Result<Self, Error>{
         let mut config = Config::new();
         config.async_support(true);
         config.consume_fuel(true);
-        
+
+        let memory_creator = Arc::new(UnsafeSharedMemoryCreator::new());
+
+        config.with_host_memory(memory_creator.clone());
+
         let engine = Engine::new(&config)?;
 
+        memory_creator.set_engine(engine.clone())?;
 
         let module = Module::from_file(&engine, module)?;
         let mut linker = Linker::new(&engine);
@@ -65,10 +76,10 @@ impl Process{
 
             println!("host received: {}",f_ptr);
 
-            let handler: JoinHandle<Result<i32, Error>>= tokio::task::spawn(async move{
+            let handler: JoinHandle<Result<i32, Error>> = tokio::task::spawn(async move{
 
                 let (mut store, instance) = Self::create_environment(&engine, &module, linker.as_ref(), "child").await?;
-                instance.get_memory(&mut store, "memory");
+                
                 store.data_mut().table().insert_at(THREAD_DATA_KEY, Box::new(ThreadData::new(engine, module, linker, instance, new_thread_id, "child".to_owned())));
 
                 Self::run_async_with(store, instance, f_ptr).await

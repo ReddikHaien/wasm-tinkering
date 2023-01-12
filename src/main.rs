@@ -7,7 +7,7 @@ mod process;
 #[tokio::main]
 async fn main() -> Result<(),Error>{
 
-    let process = Process::new("wasm-test.wasm")?;
+    let process = Process::new("wasm-test.wasm").await?;
 
     process.wait_for_completion().await
 }
