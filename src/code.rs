@@ -1,5 +1,17 @@
 use noak::reader::{attributes::{Index, RawInstruction}, cpool::ConstantPool};
 
+const BYTE: char = 'B';
+const CHAR: char = 'C';
+const INT: char = 'I';
+const SHORT: char = 'S';
+const BOOL: char = 'Z';
+
+const FLOAT: char = 'F';
+const DOUBLE: char = 'D';
+const LONG: char = 'J';
+const REF: char = 'L';
+const ARR: char = '[';
+
 pub struct Stack{
     inputs: Vec<Value>,
     values: Vec<Value>
@@ -289,68 +301,88 @@ pub fn generate_stack(block: &[(Index, RawInstruction)], cp: &ConstantPool, inpu
                 let fr = cp.get(*index).unwrap();
                 let nt = cp.get(fr.name_and_type).unwrap();
                 let utf8 = cp.get(nt.descriptor).unwrap();
-
                 let descriptor = utf8.content.to_str().unwrap();
+                match descriptor.chars().next() {
+                    Some(BYTE | BOOL | SHORT | CHAR | INT) => stack.push(Value::I32),
+                    Some(FLOAT) => stack.push(Value::F32),
+                    Some(DOUBLE) => stack.push(Value::F64),
+                    Some(LONG) => stack.push(Value::I64),
+                    Some(REF | ARR) => stack.push(Value::Ref),
 
-                match &descriptor[1..2] {
-                    
-
-                    x => panic!("Invalid descriptor char {}", x)
+                    x => panic!("Invalid descriptor char {:?}", x)
                 }
             }
-            RawInstruction::GetStatic { index } => todo!(),
-            RawInstruction::Goto { offset } => todo!(),
-            RawInstruction::GotoW { offset } => todo!(),
-            RawInstruction::I2B => todo!(),
-            RawInstruction::I2C => todo!(),
-            RawInstruction::I2D => todo!(),
-            RawInstruction::I2F => todo!(),
-            RawInstruction::I2L => todo!(),
-            RawInstruction::I2S => todo!(),
-            RawInstruction::IAdd => todo!(),
-            RawInstruction::IAnd => todo!(),
-            RawInstruction::IConstM1 => todo!(),
-            RawInstruction::IConst0 => todo!(),
-            RawInstruction::IConst1 => todo!(),
-            RawInstruction::IConst2 => todo!(),
-            RawInstruction::IConst3 => todo!(),
-            RawInstruction::IConst4 => todo!(),
-            RawInstruction::IConst5 => todo!(),
-            RawInstruction::IDiv => todo!(),
-            RawInstruction::IfACmpEq { offset } => todo!(),
-            RawInstruction::IfACmpNe { offset } => todo!(),
-            RawInstruction::IfICmpEq { offset } => todo!(),
-            RawInstruction::IfICmpNe { offset } => todo!(),
-            RawInstruction::IfICmpLt { offset } => todo!(),
-            RawInstruction::IfICmpGe { offset } => todo!(),
-            RawInstruction::IfICmpGt { offset } => todo!(),
-            RawInstruction::IfICmpLe { offset } => todo!(),
-            RawInstruction::IfEq { offset } => todo!(),
-            RawInstruction::IfNe { offset } => todo!(),
-            RawInstruction::IfLt { offset } => todo!(),
-            RawInstruction::IfGe { offset } => todo!(),
-            RawInstruction::IfGt { offset } => todo!(),
-            RawInstruction::IfLe { offset } => todo!(),
-            RawInstruction::IfNonNull { offset } => todo!(),
-            RawInstruction::IfNull { offset } => todo!(),
-            RawInstruction::IInc { index, value } => todo!(),
-            RawInstruction::IIncW { index, value } => todo!(),
-            RawInstruction::ILoad { index } => todo!(),
-            RawInstruction::ILoadW { index } => todo!(),
-            RawInstruction::ILoad0 => todo!(),
-            RawInstruction::ILoad1 => todo!(),
-            RawInstruction::ILoad2 => todo!(),
-            RawInstruction::ILoad3 => todo!(),
-            RawInstruction::IMul => todo!(),
-            RawInstruction::INeg => todo!(),
-            RawInstruction::InstanceOf { index } => todo!(),
-            RawInstruction::InvokeDynamic { index } => todo!(),
+            RawInstruction::GetStatic { index } => {
+                let fr = cp.get(*index).unwrap();
+                let nt = cp.get(fr.name_and_type).unwrap();
+                let utf8 = cp.get(nt.descriptor).unwrap();
+                let descriptor = utf8.content.to_str().unwrap();
+                match descriptor.chars().next() {
+                    Some(BYTE | BOOL | SHORT | CHAR | INT) => stack.push(Value::I32),
+                    Some(FLOAT) => stack.push(Value::F32),
+                    Some(DOUBLE) => stack.push(Value::F64),
+                    Some(LONG) => stack.push(Value::I64),
+                    Some(REF | ARR) => stack.push(Value::Ref),
+
+                    x => panic!("Invalid descriptor char {:?}", x)
+                }
+            },
+            RawInstruction::Goto { offset } => (),
+            RawInstruction::GotoW { offset } => (),
+            RawInstruction::I2S |
+            RawInstruction::I2C |
+            RawInstruction::I2B => stack.convert(Value::I32, Value::I32),
+            RawInstruction::I2D => stack.convert(Value::I32, Value::F32),
+            RawInstruction::I2F => stack.convert(Value::I32, Value::F32),
+            RawInstruction::I2L => stack.convert(Value::I32, Value::I64),
+            RawInstruction::IAnd |
+            RawInstruction::IDiv |
+            RawInstruction::IMul |
+            RawInstruction::IOr |
+            RawInstruction::IRem |
+            RawInstruction::IAdd => stack.bin_op(Value::I32),
+            RawInstruction::IConstM1 |
+            RawInstruction::IConst0 |
+            RawInstruction::IConst1 |
+            RawInstruction::IConst2 |
+            RawInstruction::IConst3 |
+            RawInstruction::IConst4 |
+            RawInstruction::ILoadW { .. } |
+            RawInstruction::ILoad { .. } |
+            RawInstruction::ILoad0 |
+            RawInstruction::ILoad1 |
+            RawInstruction::ILoad2 |
+            RawInstruction::ILoad3 |
+            RawInstruction::IConst5 => stack.push(Value::I32),
+            RawInstruction::IfACmpNe { offset } |
+            RawInstruction::IfACmpEq { offset } => {stack.pop_known(Value::Ref); stack.pop_known(Value::Ref);},
+            RawInstruction::IfICmpEq { offset } |
+            RawInstruction::IfICmpNe { offset } |
+            RawInstruction::IfICmpLt { offset } |
+            RawInstruction::IfICmpGe { offset } |
+            RawInstruction::IfICmpGt { offset } |
+            RawInstruction::IfICmpLe { offset } => {stack.pop_known(Value::I32); stack.pop_known(Value::I32);},
+            RawInstruction::IfEq { offset } |
+            RawInstruction::IfNe { offset } |
+            RawInstruction::IfLt { offset } |
+            RawInstruction::IfGe { offset } |
+            RawInstruction::IfGt { offset } |
+            RawInstruction::IfLe { offset } => {stack.pop_known(Value::I32);},
+            RawInstruction::IfNull { offset } => {stack.pop_known(Value::Ref);}
+            RawInstruction::IfNonNull { offset } => {stack.pop_known(Value::Ref);},
+            RawInstruction::IInc { index, value } => (),
+            RawInstruction::IIncW { index, value } => (),
+            RawInstruction::INeg => stack.convert(Value::I32, Value::I32),
+            RawInstruction::InstanceOf { index } => stack.convert(Value::Ref, Value::I32),
+            RawInstruction::InvokeDynamic { index } => {
+                let id = cp.get(*index).unwrap();
+                let nt = cp.get(id.name_and_type).unwrap();
+                let d = cp.get(nt.descriptor);
+            }
             RawInstruction::InvokeInterface { index, count } => todo!(),
             RawInstruction::InvokeSpecial { index } => todo!(),
             RawInstruction::InvokeStatic { index } => todo!(),
             RawInstruction::InvokeVirtual { index } => todo!(),
-            RawInstruction::IOr => todo!(),
-            RawInstruction::IRem => todo!(),
             RawInstruction::IReturn => todo!(),
             RawInstruction::IShL => todo!(),
             RawInstruction::IShR => todo!(),
@@ -424,3 +456,10 @@ pub fn generate_stack(block: &[(Index, RawInstruction)], cp: &ConstantPool, inpu
 
     stack
 } 
+
+fn parse_method_descriptor(descriptor: &str) -> (Vec<char>, Option<char>){
+    let mut iterator = descriptor.chars().peekable();
+    assert_eq!(iterator.next(), Some('('));
+
+    todo!()
+}

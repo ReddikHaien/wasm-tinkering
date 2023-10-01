@@ -1,185 +1,161 @@
-pub mod code;
+use std::{fs::File, io::Read, cell::OnceCell, sync::OnceLock, future::Future};
 
-use std::{fs::File, error::Error, io::Read, any, ops::Add};
-
-use anyhow::bail;
-use noak::reader::{Class, attributes::RawInstruction};
+use futures::future::FutureExt;
+use dashmap::DashMap;
+use noak::reader::cpool::Item;
+use peg::parser;
+use tokio::{task::JoinHandle, pin};
 use zip::ZipArchive;
 
-fn main() -> Result<(), anyhow::Error>{
-    let mut archive = ZipArchive::new(File::open("./jagexappletviewer.jar")?)?;
+pub mod work;
+pub mod data;
 
-
-    for index in 0..archive.len(){
-        let mut file = archive.by_index(index)?;
-        if file.name().ends_with(".class"){
-            let mut bytes = Vec::with_capacity(file.size() as usize);
-            file.read_to_end(&mut bytes)?;
-            
-            let mut class = Class::new(&bytes)?;
-
-            for method in class.methods()? {
-                let method = method?;
-
-                for attribute in method.attributes(){
-                    let attribute = attribute?;
-                    if class.pool()?.retrieve(attribute.name())?.as_bytes() == b"Code"{
-                        let content = attribute.read_content(class.pool()?)?;
-                        match content {
-                            noak::reader::AttributeContent::Code(code) => {
-                                let mut leaders = vec![0];
-                                for exception in code.exception_handlers(){
-                                    leaders.push(exception.handler().as_u32());
-                                }
-
-                                let mut instructions = Vec::with_capacity(10);
-                                
-                                for instruction in code.raw_instructions(){
-                                    instructions.push(instruction?);
-                                }
-
-                                let mut l = 0;
-                                for (i, _) in instructions.iter(){
-                                    if i.as_u32() >= l{
-                                        l = i.as_u32();
-                                    }
-                                    else {
-                                        bail!("Invalid label order in method.")
-                                    }
-                                 }
-
-                                for (index, instruction) in instructions.iter(){
-                                    
-                                    match instruction {
-                                        noak::reader::attributes::RawInstruction::AReturn |
-                                        noak::reader::attributes::RawInstruction::DReturn |
-                                        noak::reader::attributes::RawInstruction::IReturn |
-                                        noak::reader::attributes::RawInstruction::LReturn |
-                                        noak::reader::attributes::RawInstruction::Return |
-                                        noak::reader::attributes::RawInstruction::AThrow |
-                                        noak::reader::attributes::RawInstruction::FReturn => {
-                                            leaders.push(index.as_u32()+1);
-                                        },
-                                        noak::reader::attributes::RawInstruction::CheckCast {..} => leaders.push(index.as_u32()+2),
-                                        
-                                        noak::reader::attributes::RawInstruction::GotoW { offset } => {
-                                            leaders.push(index.as_u32().wrapping_add_signed(*offset));
-                                            leaders.push(index.as_u32().add(4));
-                                        },
-                                        noak::reader::attributes::RawInstruction::Goto { offset } |
-                                        noak::reader::attributes::RawInstruction::IfACmpEq { offset } |
-                                        noak::reader::attributes::RawInstruction::IfACmpNe { offset } |
-                                        noak::reader::attributes::RawInstruction::IfICmpEq { offset } |
-                                        noak::reader::attributes::RawInstruction::IfICmpNe { offset } |
-                                        noak::reader::attributes::RawInstruction::IfICmpLt { offset } |
-                                        noak::reader::attributes::RawInstruction::IfICmpGe { offset } |
-                                        noak::reader::attributes::RawInstruction::IfICmpGt { offset } |
-                                        noak::reader::attributes::RawInstruction::IfICmpLe { offset } |
-                                        noak::reader::attributes::RawInstruction::IfEq { offset } |
-                                        noak::reader::attributes::RawInstruction::IfNe { offset } |
-                                        noak::reader::attributes::RawInstruction::IfLt { offset } |
-                                        noak::reader::attributes::RawInstruction::IfGe { offset } |
-                                        noak::reader::attributes::RawInstruction::IfGt { offset } |
-                                        noak::reader::attributes::RawInstruction::IfLe { offset } |
-                                        noak::reader::attributes::RawInstruction::IfNonNull { offset } |
-                                        noak::reader::attributes::RawInstruction::IfNull { offset } => {
-                                            leaders.push(index.as_u32().wrapping_add_signed(*offset as i32));
-                                            leaders.push(index.as_u32().add(2));
-                                        },
-                                        noak::reader::attributes::RawInstruction::JSr { offset } => todo!(),
-                                        noak::reader::attributes::RawInstruction::Ret { index } => todo!(),
-                                        noak::reader::attributes::RawInstruction::JSrW { offset } => todo!(),
-                                        noak::reader::attributes::RawInstruction::RetW { index } => todo!(),
-                                        noak::reader::attributes::RawInstruction::LookupSwitch(lookup) => {
-                                            leaders.push(index.as_u32().wrapping_add_signed(lookup.default_offset()));
-                                            for jump in lookup.pairs(){
-                                                leaders.push(index.as_u32().wrapping_add_signed(jump.offset()));
-                                            }
-                                        },
-                                        noak::reader::attributes::RawInstruction::TableSwitch(table) => {
-                                            leaders.push(index.as_u32().wrapping_add_signed(table.default_offset()));
-                                            for jump in table.pairs(){
-                                                leaders.push(index.as_u32().wrapping_add_signed(jump.offset()));
-                                            }
-                                        },
-                                        _ => ()
-                                    }
-                                }
-                                
-                                leaders.retain(|x| instructions.binary_search_by_key(x, |y| y.0.as_u32()).is_ok());
-                                leaders.sort();
-                                leaders.dedup();
-
-                                println!("{:?}",leaders);
-
-                                let mut blocks = Vec::new();
-
-                                for leader in leaders.iter(){
-                                    let leader = *leader;
-                                    let Ok(start) = instructions.binary_search_by_key(&leader, |x| x.0.as_u32()) else{ bail!("Invalid address {}", leader);};
-
-                                    for (end, (_, i)) in instructions[start..].iter().enumerate(){
-                                        if is_jump(i){
-                                            blocks.push(&instructions[start..=(start + end)]);
-                                            break;
-                                        }
-
-                                        if let Some((i, _)) = instructions.get(start + end+1){
-                                            if let Ok(_)  = leaders.binary_search(&i.as_u32()){
-                                                blocks.push(&instructions[start..(start + end+1)]);
-                                            }
-                                        } 
-                                    }
-                                }
-
-                                println!("{:?}", blocks);
-                            },
-                            x => bail!("Unreachable, expected Code but got {:#?}",x)
-                        }
-                    }
-                }
+macro_rules! run {
+    ($it:ident => $f:ident) => {
+        {
+            let mut handles = Vec::new();
+            for i in $it{
+                handles.push(
+                    tokio::spawn(async move {
+                        $f(i).await
+                    })
+                );
+                
             }
+            for h in handles{
+                h.await??;
+            }
+        }   
+    };
+}
 
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error>{
+    static class_data: OnceLock<DashMap<Box<[u8]>, Vec<u8>>> = OnceLock::new();
+    class_data.get_or_init(|| DashMap::new());
+
+    let mut names = Vec::new();
+    for file in ["./jagexappletviewer.jar"]{
+        let mut archive = ZipArchive::new(File::open(file)?)?;
+        
+        for i in 0..archive.len(){
+            let mut file = archive.by_index(i)?;
+            let name = file.name();
+            if name.ends_with(".class") {
+                let mut bytes = Vec::new();
+                let name = name[..name.len()-"class".len()].bytes().collect::<Vec<_>>().into_boxed_slice();
+                file.read_to_end(&mut bytes)?;
+                class_data.get().unwrap().insert(name.clone(), bytes);
+                names.push(name);
+            }
         }
     }
 
+    static PARSED_CLASSES: OnceLock<DashMap<Box<[u8]>, Vec<u8>>> = OnceLock::new();
+    class_data.get_or_init(|| DashMap::new());
+    async fn parse_class(name: Box<[u8]>) -> anyhow::Result<()>{
+        if PARSED_CLASSES.get().unwrap().contains_key(&name){
+            return Ok(());
+        }
+
+        if let Some(bytes) = class_data.get().unwrap().get(&name){
+            let mut class = noak::reader::Class::new(&bytes.value())?;
+
+            let pool = class.pool()?;
+
+            for item in pool.iter(){
+                match item {
+                    Item::Class(c) => {
+                        let name = pool.get(c.name)?;
+                        let name = Vec::from_iter(name.content.as_bytes().iter().cloned()).into_boxed_slice();
+                        spawn_parse_class(name).await??;
+                    }
+                    Item::FieldRef(f) => {
+                        let reference = pool.get(f.name_and_type)?;
+                        let descriptor = pool.get(reference.descriptor)?;
+                        let type_ = descriptor_parser::field(descriptor.content.as_bytes())?;
+                        match type_ {
+                            JavaType::Reference(_, n) => {
+                                spawn_parse_class(n).await??
+                            },
+                            _ => ()
+                        }
+                    },
+                    Item::MethodRef(m) => {
+                        let reference = pool.get(m.name_and_type)?;
+                        let descriptor = pool.get(reference.descriptor)?;
+                        let types = descriptor_parser::class_names(descriptor.content.as_bytes())?;
+                        for type_ in types{
+                            if let JavaType::Reference(_,n) = type_ {
+                                spawn_parse_class(n).await??;
+                            }
+                        }
+                    },
+                    Item::InterfaceMethodRef(_) => todo!(),
+                    Item::String(_) => todo!(),
+                    Item::Integer(_) => todo!(),
+                    Item::Long(_) => todo!(),
+                    Item::Float(_) => todo!(),
+                    Item::Double(_) => todo!(),
+                    Item::NameAndType(_) => todo!(),
+                    Item::Utf8(_) => todo!(),
+                    Item::MethodHandle(_) => todo!(),
+                    Item::MethodType(_) => todo!(),
+                    Item::Dynamic(_) => todo!(),
+                    Item::InvokeDynamic(_) => todo!(),
+                    Item::Module(_) => todo!(),
+                    Item::Package(_) => todo!(),
+                }
+            }
+        }
+        Ok(())
+    }
+    fn spawn_parse_class(name: Box<[u8]>) -> JoinHandle<anyhow::Result<()>>{
+        tokio::spawn(async move{
+            parse_class(name).await
+        }.boxed())
+    }
+    run!(names => parse_class);
+    
     Ok(())
 }
 
-fn is_jump(instruction: &RawInstruction) -> bool{
-    match instruction {
-        noak::reader::attributes::RawInstruction::JSr { .. } => todo!(),
-        noak::reader::attributes::RawInstruction::Ret { .. } => todo!(),
-        noak::reader::attributes::RawInstruction::JSrW { .. } => todo!(),
-        noak::reader::attributes::RawInstruction::RetW { .. } => todo!(),
-        noak::reader::attributes::RawInstruction::AReturn |
-        noak::reader::attributes::RawInstruction::DReturn |
-        noak::reader::attributes::RawInstruction::IReturn |
-        noak::reader::attributes::RawInstruction::LReturn |
-        noak::reader::attributes::RawInstruction::Return |
-        noak::reader::attributes::RawInstruction::AThrow |
-        noak::reader::attributes::RawInstruction::FReturn |
-        noak::reader::attributes::RawInstruction::CheckCast {..} |
-        noak::reader::attributes::RawInstruction::GotoW { .. } |
-        noak::reader::attributes::RawInstruction::Goto { ..} |
-        noak::reader::attributes::RawInstruction::IfACmpEq { .. } |
-        noak::reader::attributes::RawInstruction::IfACmpNe { .. }|
-        noak::reader::attributes::RawInstruction::IfICmpEq { .. } |
-        noak::reader::attributes::RawInstruction::IfICmpNe { .. } |
-        noak::reader::attributes::RawInstruction::IfICmpLt { .. } |
-        noak::reader::attributes::RawInstruction::IfICmpGe { .. } |
-        noak::reader::attributes::RawInstruction::IfICmpGt { .. } |
-        noak::reader::attributes::RawInstruction::IfICmpLe { .. } |
-        noak::reader::attributes::RawInstruction::IfEq { .. } |
-        noak::reader::attributes::RawInstruction::IfNe { .. } |
-        noak::reader::attributes::RawInstruction::IfLt { .. } |
-        noak::reader::attributes::RawInstruction::IfGe { .. } |
-        noak::reader::attributes::RawInstruction::IfGt { .. } |
-        noak::reader::attributes::RawInstruction::IfLe { .. } |
-        noak::reader::attributes::RawInstruction::IfNonNull { .. } |
-        noak::reader::attributes::RawInstruction::IfNull { .. } |
-        noak::reader::attributes::RawInstruction::LookupSwitch(_) |
-        noak::reader::attributes::RawInstruction::TableSwitch(_) => true,
-        _ => false
+
+parser!(
+    grammar descriptor_parser() for [u8]{
+        rule primitive(c: usize) -> JavaType
+        = "B" {JavaType::Byte(c as u8)}
+        / "C" {JavaType::Char(c as u8)}
+        / "D" {JavaType::Double(c as u8)}
+        / "F" {JavaType::Float(c as u8)}
+        / "I" {JavaType::Int(c as u8)}
+        / "J" {JavaType::Long(c as u8)}
+        / "L" n:([^ 59]+) ";" {JavaType::Reference(c as u8, n.into_boxed_slice())}
+        / "S" {JavaType::Short(c as u8)}
+        / "Z" {JavaType::Bool(c as u8)}
+
+        pub rule field() -> JavaType
+        = n:$("["*) p:primitive({n.len()}) {p}
+
+        pub rule method() -> (Vec<JavaType>, JavaType)
+        = "(" x:field()* ")" r:field() {(x, r)}
+
+        pub rule class_names() -> Vec<JavaType>
+         = &"(" x: method() {let mut y = x.0; y.push(x.1); y}
+         / x:field() {vec![x]}
     }
+);
+
+
+
+enum JavaType{
+    Bool(u8),
+    Byte(u8),
+    Char(u8),
+    Short(u8),
+    Int(u8),
+    Float(u8),
+    Double(u8),
+    Long(u8), 
+    Reference(u8, Box<[u8]>)
 }
